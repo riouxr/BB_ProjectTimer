@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.7.0"
+ADDON_VERSION = "0.7.1"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -493,6 +493,8 @@ def _watchdog():
     the "still marked running but stale" case left that first one stuck
     forever, which is what actually happened in practice.
     """
+    _ensure_handlers()
+
     if _state["session_id"] is None:
         return WATCHDOG_INTERVAL
 
@@ -505,15 +507,18 @@ def _watchdog():
     return WATCHDOG_INTERVAL
 
 
+@bpy.app.handlers.persistent
 def on_load_pre(dummy1, dummy2):
     flush_current()
 
 
+@bpy.app.handlers.persistent
 def on_load_post(dummy1, dummy2):
     # bpy.ops is not always safe to call directly from a handler, so defer by one tick.
     bpy.app.timers.register(_start_modal_deferred, first_interval=0.0)
 
 
+@bpy.app.handlers.persistent
 def on_save_post(dummy1, dummy2):
     filepath = bpy.data.filepath
     if not filepath:
@@ -531,6 +536,22 @@ def on_save_post(dummy1, dummy2):
     # again moments later just because the interval had already elapsed.
     sync_log(filepath)
     _state["last_save"] = time.time()
+
+
+def _ensure_handlers():
+    """Re-attaches any of our handlers Blender's own handling silently
+    dropped. All three are already @persistent, which is the real fix -
+    without it, Blender clears these on every file load and that's exactly
+    what caused sessions to stop updating in practice. This is a backstop
+    in case something else ever removes them (another add-on touching the
+    same lists, a "Reload Scripts", etc.), checked every watchdog cycle.
+    """
+    if on_load_pre not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(on_load_pre)
+    if on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(on_load_post)
+    if on_save_post not in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.append(on_save_post)
 
 
 class BBPT_AddonPreferences(bpy.types.AddonPreferences):
