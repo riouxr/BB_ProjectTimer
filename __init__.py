@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.9.2"
+ADDON_VERSION = "0.9.3"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -305,15 +305,18 @@ def sync_kitsu(sessions):
     try:
         client = _get_kitsu_client()
         if client is None:
+            _kitsu_log("no BB_Kitsu-Pipeline client (not installed, or not logged in) - skipping")
             _state["kitsu_last_error"] = None  # not connected - a different, already-visible state
             return
         task_id = _get_kitsu_task_id()
         if not task_id:
+            _kitsu_log("no task stamped on this scene - skipping")
             _state["kitsu_last_error"] = None
             return
         person = client.user or {}
         person_id = person.get("id")
         if not person_id:
+            _kitsu_log("client has no logged-in Kitsu user - skipping")
             _state["kitsu_last_error"] = "no Kitsu user on the client"
             return
 
@@ -321,17 +324,32 @@ def sync_kitsu(sessions):
         date_str = time.strftime("%Y-%m-%d")
         path = "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id)
 
+        if minutes <= 0:
+            # Confirmed live: Kitsu/Zou rejects duration=0 with HTTP 400
+            # "Validation error" - happens for real in the first tens of
+            # seconds of a session, before a full minute has accumulated.
+            # Nothing to sync yet, not a failure.
+            _kitsu_log("only %ds tracked today, rounds to 0 minutes - Kitsu rejects that, skipping until there's at least 1" % _today_seconds(sessions))
+            _state["kitsu_last_error"] = None
+            return
+
+        _kitsu_log("syncing task_id=%s date=%s duration=%d min" % (task_id, date_str, minutes))
         try:
             client._request("POST", path, json={"duration": minutes})
+            _kitsu_log("sync OK")
             _state["kitsu_last_error"] = None
         except Exception as e:
+            _kitsu_log("sync FAILED: %s" % e)
             prefs = get_prefs()
             auto_assign = prefs.kitsu_auto_assign if prefs else False
             if auto_assign and _looks_like_not_assigned(e) and _try_kitsu_self_assign(client, task_id, person_id):
+                _kitsu_log("looks like a not-assigned error and auto-assign is on - self-assigned, retrying")
                 try:
                     client._request("POST", path, json={"duration": minutes})
+                    _kitsu_log("retry OK")
                     _state["kitsu_last_error"] = None
                 except Exception as e2:
+                    _kitsu_log("retry FAILED: %s" % e2)
                     _state["kitsu_last_error"] = str(e2)
                     return
             else:
@@ -340,7 +358,12 @@ def sync_kitsu(sessions):
 
         _ensure_kitsu_real_start_date(client, task_id)
     except Exception as e:
+        _kitsu_log("unexpected error: %s" % e)
         _state["kitsu_last_error"] = str(e)
+
+
+def _kitsu_log(message):
+    print("[BB Project Timer] Kitsu: %s" % message)
 
 
 def _looks_like_not_assigned(error):
@@ -389,9 +412,12 @@ def _ensure_kitsu_real_start_date(client, task_id):
                 "PUT", "data/tasks/%s" % task_id,
                 json={"real_start_date": time.strftime("%Y-%m-%d")},
             )
+            _kitsu_log("set real_start_date on task_id=%s" % task_id)
+        else:
+            _kitsu_log("real_start_date already set on task_id=%s - leaving it" % task_id)
         _kitsu_start_date_checked.add(task_id)
-    except Exception:
-        pass  # leave uncached so the next successful sync retries this
+    except Exception as e:
+        _kitsu_log("real_start_date check/set FAILED (will retry next sync): %s" % e)
 
 
 def sync_log(filepath):
