@@ -1,4 +1,5 @@
 import atexit
+import getpass
 import hashlib
 import os
 import sys
@@ -6,13 +7,13 @@ import time
 import uuid
 
 import bpy
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.4.0"
+ADDON_VERSION = "0.5.0"
 
-IDLE_THRESHOLD = 60.0    # seconds with no mouse click before the timer pauses
-TICK_INTERVAL = 1.0      # seconds between accounting ticks
-SAVE_INTERVAL = 60.0     # seconds between autosaves to the log file
+IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
+TICK_INTERVAL = 1.0               # seconds between accounting ticks
+DEFAULT_SAVE_INTERVAL_MINUTES = 1  # fallback if preferences aren't available yet
 
 # Module-level state - not stored as bpy properties since it needs to keep
 # ticking via a modal operator/timer regardless of which object/scene is active.
@@ -25,6 +26,7 @@ SAVE_INTERVAL = 60.0     # seconds between autosaves to the log file
 _state = {
     "session_id": None,
     "log_filepath": None,     # the .blend path the current session is logged against
+    "username": "",
     "session_start": 0.0,
     "session_seconds": 0.0,
     "grand_total": 0.0,       # session_seconds + every other session's seconds, from the log file
@@ -34,6 +36,13 @@ _state = {
     "paused": True,
     "running": False,
 }
+
+
+def get_username():
+    try:
+        return getpass.getuser() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def get_prefs():
@@ -75,7 +84,11 @@ def format_hms(seconds):
 
 
 def parse_sessions(path):
-    """Returns {session_id: {"sid", "start", "end", "seconds"}}."""
+    """Returns {session_id: {"sid", "start", "end", "seconds", "user"}}.
+
+    ``user`` is "" for sessions logged before usernames existed, or logged
+    while the "Log Usernames" preference was off.
+    """
     sessions = {}
     if not os.path.isfile(path):
         return sessions
@@ -95,6 +108,7 @@ def parse_sessions(path):
                         "start": float(fields["start"]),
                         "end": float(fields["end"]),
                         "seconds": float(fields["seconds"]),
+                        "user": fields.get("user", "").replace("_", " "),
                     }
                 except (KeyError, ValueError):
                     continue
@@ -116,7 +130,25 @@ def _group_by_day(ordered):
     return [(d, sum(s["seconds"] for s in days[d]), days[d]) for d in order]
 
 
+def _group_by_user(ordered):
+    """Session list -> [(username, total_seconds), ...], by first appearance."""
+    users = {}
+    order = []
+    for s in ordered:
+        name = s.get("user") or "(unspecified)"
+        if name not in users:
+            users[name] = 0.0
+            order.append(name)
+        users[name] += s["seconds"]
+    return [(name, users[name]) for name in order]
+
+
 def write_log(path, sessions, filepath):
+    prefs = get_prefs()
+    show_days = prefs.show_daily_breakdown if prefs else True
+    show_sessions = prefs.show_session_detail if prefs else True
+    show_users = prefs.log_usernames if prefs else True
+
     ordered = sorted(sessions.values(), key=lambda s: s["start"])
     total = sum(s["seconds"] for s in ordered)
     try:
@@ -124,23 +156,36 @@ def write_log(path, sessions, filepath):
             f.write("# BB Project Timer log - machine-readable lines below, do not edit by hand\n")
             f.write("TOTAL=%.1f\n" % total)
             for s in ordered:
-                f.write("SESSION sid=%s start=%.1f end=%.1f seconds=%.1f\n" % (
-                    s["sid"], s["start"], s["end"], s["seconds"]))
+                user_field = " user=%s" % s["user"].replace(" ", "_") if s.get("user") else ""
+                f.write("SESSION sid=%s start=%.1f end=%.1f seconds=%.1f%s\n" % (
+                    s["sid"], s["start"], s["end"], s["seconds"], user_field))
             f.write("\n")
             f.write("Total time on %s: %s\n\n" % (os.path.basename(filepath), format_hms(total)))
 
-            f.write("By day:\n")
-            for date_str, day_total, _day_sessions in _group_by_day(ordered):
-                f.write("  %s   %s\n" % (date_str, format_hms(day_total)))
-            f.write("\n")
+            if show_users:
+                f.write("By user:\n")
+                for name, secs in _group_by_user(ordered):
+                    f.write("  %-20s %s\n" % (name, format_hms(secs)))
+                f.write("\n")
 
-            f.write("Sessions:\n")
-            for date_str, _day_total, day_sessions in _group_by_day(ordered):
-                f.write("  %s\n" % date_str)
-                for s in day_sessions:
-                    start_str = time.strftime("%H:%M", time.localtime(s["start"]))
-                    end_str = time.strftime("%H:%M", time.localtime(s["end"]))
-                    f.write("    %s - %s   %s\n" % (start_str, end_str, format_hms(s["seconds"])))
+            if show_days:
+                f.write("By day:\n")
+                for date_str, day_total, day_sessions in _group_by_day(ordered):
+                    f.write("  %s   %s\n" % (date_str, format_hms(day_total)))
+                    if show_users:
+                        for name, secs in _group_by_user(day_sessions):
+                            f.write("    %-18s %s\n" % (name, format_hms(secs)))
+                f.write("\n")
+
+            if show_sessions:
+                f.write("Sessions:\n")
+                for date_str, _day_total, day_sessions in _group_by_day(ordered):
+                    f.write("  %s\n" % date_str)
+                    for s in day_sessions:
+                        start_str = time.strftime("%H:%M", time.localtime(s["start"]))
+                        end_str = time.strftime("%H:%M", time.localtime(s["end"]))
+                        who = "   %s" % s["user"] if show_users and s.get("user") else ""
+                        f.write("    %s - %s   %s%s\n" % (start_str, end_str, format_hms(s["seconds"]), who))
     except OSError:
         pass
     return total
@@ -242,12 +287,16 @@ def sync_log(filepath):
     except OSError:
         pass
 
+    prefs = get_prefs()
+    log_usernames = prefs.log_usernames if prefs else True
+
     sessions = parse_sessions(path)
     sessions[_state["session_id"]] = {
         "sid": _state["session_id"],
         "start": _state["session_start"],
         "end": time.time(),
         "seconds": _state["session_seconds"],
+        "user": _state["username"] if log_usernames else "",
     }
     _state["grand_total"] = write_log(path, sessions, filepath)
     sync_kitsu(sessions)
@@ -263,6 +312,7 @@ def reset_state_for_current_file():
 
     _state["session_id"] = uuid.uuid4().hex[:8]
     _state["log_filepath"] = filepath
+    _state["username"] = get_username()
     _state["session_start"] = now
     _state["session_seconds"] = 0.0
     _state["last_tick"] = now
@@ -289,7 +339,9 @@ def tick():
         _state["session_seconds"] += dt
         _state["grand_total"] += dt
 
-    if now - _state["last_save"] >= SAVE_INTERVAL:
+    prefs = get_prefs()
+    interval_minutes = prefs.save_interval_minutes if prefs else DEFAULT_SAVE_INTERVAL_MINUTES
+    if now - _state["last_save"] >= max(interval_minutes, 1) * 60:
         _state["last_save"] = now
         flush_current()
 
@@ -387,10 +439,62 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         default="",
     )
 
+    save_interval_minutes: IntProperty(
+        name="Save Every (minutes)",
+        description=(
+            "How often the log is saved (and synced to Kitsu, if connected). "
+            "Lower values lose less time on a crash, at the cost of slightly "
+            "more frequent disk/network writes"
+        ),
+        default=1,
+        min=1,
+        soft_max=30,
+    )
+
+    show_daily_breakdown: BoolProperty(
+        name="Show Daily Breakdown",
+        description=(
+            "Include a readable day-by-day total in the log file. The "
+            "underlying per-session record is always kept regardless, so "
+            "totals and multi-instance syncing stay correct either way - "
+            "this only controls what's shown as readable text"
+        ),
+        default=True,
+    )
+
+    show_session_detail: BoolProperty(
+        name="Show Session Times",
+        description=(
+            "Include each session's exact start/end time in the log file as "
+            "readable text. The underlying record is always kept for "
+            "accuracy; this only controls whether it's shown as readable text"
+        ),
+        default=True,
+    )
+
+    log_usernames: BoolProperty(
+        name="Log Usernames",
+        description=(
+            "Record who (OS username) logged each session, and show a "
+            "per-user total per file. Turn off to keep the log anonymous - "
+            "no username is written at all while this is off"
+        ),
+        default=True,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "log_path")
         layout.label(text="Leave empty to save the log next to each .blend file", icon='INFO')
+
+        layout.separator()
+        layout.prop(self, "save_interval_minutes")
+
+        layout.separator()
+        col = layout.column(heading="Log Detail")
+        col.prop(self, "show_daily_breakdown")
+        col.prop(self, "show_session_detail")
+        col.prop(self, "log_usernames")
 
 
 class BBPT_PT_panel(bpy.types.Panel):

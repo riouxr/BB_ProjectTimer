@@ -6,11 +6,17 @@ A Blender extension that automatically tracks time spent working on a `.blend` f
 
 - Starts automatically when a file is loaded - there is no manual start/stop control, so it can't be toggled off from the UI.
 - Counts time as active only while there is mouse-click activity; if there's no click for 60 seconds, tracking pauses.
-- Saves progress to a `<blendfile>_time.txt` log file every 60 seconds and on file switch/quit, so a crash loses at most ~1 minute of tracked time.
-- Every time you reopen the file, a new **session** starts. The log keeps one line per session (start, end, duration), grouped and totalled per day, plus the running total across all sessions - so you can see today's time, any past day's time, and lifetime project time.
+- Saves progress to a `<blendfile>_time.txt` log file (every minute by default - see below) and on file switch/quit, so a crash loses at most that long of tracked time.
+- Every time you reopen the file, a new **session** starts. The log keeps one line per session (start, end, duration), grouped and totalled per day, per user, and across the whole file - so you can see today's time, any past day's time, who worked on it, and lifetime project time.
 - Shows live status, this session's time, and the file's total time in the 3D Viewport sidebar (N-panel), under the **Tool** tab.
-- The log location is configurable in the add-on preferences (**Log Folder**). Leave it empty to save next to each `.blend` file (default), or point it at a shared folder to collect logs from many projects in one place.
 - Safe with several Blender instances open at once: each instance only ever writes its own session line, so tracking different files - or even the same file open twice - doesn't clobber another instance's time. The total is simply the sum of every session line in the log.
+
+## Preferences
+
+- **Log Folder** - where the log is saved. Leave empty (default) to save next to each `.blend` file, or point it at a shared folder to collect logs from many projects in one place.
+- **Save Every (minutes)** - how often the log is saved and synced to Kitsu. Default is 1 minute; raise it for fewer writes, lower it (minimum 1) for tighter crash protection.
+- **Show Daily Breakdown** / **Show Session Times** - hide the per-day or per-session readable sections in the log if that's more detail than you want visible. The underlying per-session record is always kept either way - this only affects the readable text, not what's tracked, since the totals and multi-instance syncing depend on it staying complete.
+- **Log Usernames** - tag each session with the OS username that logged it, and show a per-user total. Turn off to keep the log anonymous; no username is written while it's off.
 
 ## Kitsu integration (optional)
 
