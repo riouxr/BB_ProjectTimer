@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.8.0"
+ADDON_VERSION = "0.8.1"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -42,6 +42,7 @@ _state = {
     # A stale instance notices its generation no longer matches and cancels
     # itself instead of us having to reliably detect that it already died.
     "generation": 0,
+    "kitsu_last_error": None,  # None = last Kitsu sync attempt (if any) succeeded
 }
 
 
@@ -285,37 +286,52 @@ def _today_seconds(sessions):
 def sync_kitsu(sessions):
     """Push today's tracked total for the current task to Kitsu.
 
-    Best-effort and silent: no BB_Kitsu-Pipeline, not logged in, or no task
-    assigned to this file are all just "nothing to do", not errors - and
-    any Kitsu/network failure is swallowed so this integration can never
-    break the timer itself. Kitsu's time-spent endpoint *replaces* the
-    day's logged duration rather than adding to it, so this always sends
-    the full total tracked for today rather than this session's delta -
-    which also means a manual edit made directly in Kitsu for that task
-    and day will be overwritten on the next sync.
+    Best-effort: no BB_Kitsu-Pipeline, not logged in, or no task assigned to
+    this file are all just "nothing to do", not errors, and any Kitsu/network
+    failure is swallowed so this integration can never break the timer
+    itself. Kitsu's time-spent endpoint *replaces* the day's logged duration
+    rather than adding to it, so this always sends the full total tracked
+    for today rather than this session's delta - which also means a manual
+    edit made directly in Kitsu for that task and day will be overwritten on
+    the next sync.
+
+    Unlike earlier versions, a failed write is not silent to the user: it's
+    recorded in _state["kitsu_last_error"] so the panel can show it, since a
+    blind "syncing" checkmark that's actually failing every time (e.g. the
+    task isn't assigned to this person - a real case that happened) is worse
+    than showing nothing.
     """
     try:
         client = _get_kitsu_client()
         if client is None:
+            _state["kitsu_last_error"] = None  # not connected - a different, already-visible state
             return
         task_id = _get_kitsu_task_id()
         if not task_id:
+            _state["kitsu_last_error"] = None
             return
         person = client.user or {}
         person_id = person.get("id")
         if not person_id:
+            _state["kitsu_last_error"] = "no Kitsu user on the client"
             return
 
         minutes = int(round(_today_seconds(sessions) / 60.0))
         date_str = time.strftime("%Y-%m-%d")
-        client._request(
-            "POST",
-            "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id),
-            json={"duration": minutes},
-        )
+        try:
+            client._request(
+                "POST",
+                "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id),
+                json={"duration": minutes},
+            )
+            _state["kitsu_last_error"] = None
+        except Exception as e:
+            _state["kitsu_last_error"] = str(e)
+            return  # don't attempt the start-date check off a failed sync
+
         _ensure_kitsu_real_start_date(client, task_id)
-    except Exception:
-        pass
+    except Exception as e:
+        _state["kitsu_last_error"] = str(e)
 
 
 # Task ids already checked/set this Blender session - real_start_date only
@@ -690,10 +706,17 @@ class BBPT_PT_panel(bpy.types.Panel):
 
         task_id = _get_kitsu_task_id()
         if task_id:
-            if _get_kitsu_client() is not None:
-                layout.label(text="Syncing to Kitsu", icon='CHECKMARK')
-            else:
+            if _get_kitsu_client() is None:
                 layout.label(text="Kitsu task set, not logged in", icon='ERROR')
+            elif _state["kitsu_last_error"]:
+                layout.label(text="Kitsu sync failing", icon='ERROR')
+                err_box = layout.box()
+                err_text = _state["kitsu_last_error"]
+                err_box.label(text=err_text[:60] + ("..." if len(err_text) > 60 else ""))
+                if "403" in err_text or "not authorised" in err_text.lower():
+                    err_box.label(text="Are you assigned to this task in Kitsu?")
+            else:
+                layout.label(text="Syncing to Kitsu", icon='CHECKMARK')
 
 
 classes = (
