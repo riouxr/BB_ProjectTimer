@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.6.1"
+ADDON_VERSION = "0.7.0"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -515,13 +515,22 @@ def on_load_post(dummy1, dummy2):
 
 
 def on_save_post(dummy1, dummy2):
-    # Covers "File > Save" on a file that had no path yet, and "Save As" -
-    # both change bpy.data.filepath without going through load_post. The
-    # time already accumulated this session carries over to the new path.
     filepath = bpy.data.filepath
-    if filepath and filepath != _state["log_filepath"]:
+    if not filepath:
+        return
+
+    # "File > Save" on a file that had no path yet, and "Save As", both
+    # change bpy.data.filepath without going through load_post - point
+    # tracking at the new path, carrying over what's accumulated so far.
+    if filepath != _state["log_filepath"]:
         _state["log_filepath"] = filepath
-        sync_log(filepath)
+
+    # Every save is a natural checkpoint - flush the log now rather than
+    # waiting out the autosave interval, so what's on disk always reflects
+    # what was just saved. Reset the autosave clock too, so it doesn't fire
+    # again moments later just because the interval had already elapsed.
+    sync_log(filepath)
+    _state["last_save"] = time.time()
 
 
 class BBPT_AddonPreferences(bpy.types.AddonPreferences):
