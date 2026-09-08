@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.5.1"
+ADDON_VERSION = "0.6.0"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -34,6 +34,7 @@ _state = {
     "last_click": 0.0,
     "last_save": 0.0,
     "paused": True,
+    "pause_reason": None,     # "idle" | "unfocused" | None
     "running": False,
     # Bumped on every file load. Loading a file can silently invalidate a
     # running modal operator without Blender ever calling its cancel() -
@@ -49,6 +50,34 @@ def get_username():
         return getpass.getuser() or "unknown"
     except Exception:
         return "unknown"
+
+
+def is_blender_focused():
+    """True if this Blender process currently owns the OS foreground window.
+
+    Windows-only (checked via the Win32 API) - there's no cross-platform way
+    to ask this from Python without extra dependencies, and Blender itself
+    exposes no focus-changed event. On macOS/Linux this always returns True,
+    so tracking there falls back to click-based idle detection alone, same
+    as before this existed.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+
+        owner_pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        return owner_pid.value == kernel32.GetCurrentProcessId()
+    except Exception:
+        # Never let a platform quirk here break time tracking.
+        return True
 
 
 def get_prefs():
@@ -339,7 +368,20 @@ def tick():
     _state["last_tick"] = now
 
     idle = now - _state["last_click"]
-    _state["paused"] = idle > IDLE_THRESHOLD
+    if not is_blender_focused():
+        # Switched to another window (another Blender instance, or anything
+        # else) - stop counting immediately rather than waiting out the idle
+        # threshold. Resuming still needs a real click once this instance is
+        # focused again if the idle threshold has since passed, same as any
+        # other pause.
+        _state["paused"] = True
+        _state["pause_reason"] = "unfocused"
+    elif idle > IDLE_THRESHOLD:
+        _state["paused"] = True
+        _state["pause_reason"] = "idle"
+    else:
+        _state["paused"] = False
+        _state["pause_reason"] = None
 
     if not _state["paused"]:
         _state["session_seconds"] += dt
@@ -557,7 +599,10 @@ class BBPT_PT_panel(bpy.types.Panel):
             layout.label(text="Save the file to start tracking", icon='ERROR')
             return
 
-        status = "Paused (idle)" if _state["paused"] else "Tracking"
+        if _state["paused"]:
+            status = "Paused (other window)" if _state["pause_reason"] == "unfocused" else "Paused (idle)"
+        else:
+            status = "Tracking"
         icon = 'PAUSE' if _state["paused"] else 'REC'
         layout.label(text=status, icon=icon)
 
