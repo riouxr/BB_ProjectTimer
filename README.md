@@ -12,6 +12,15 @@ A Blender extension that automatically tracks time spent working on a `.blend` f
 - The log location is configurable in the add-on preferences (**Log Folder**). Leave it empty to save next to each `.blend` file (default), or point it at a shared folder to collect logs from many projects in one place.
 - Safe with several Blender instances open at once: each instance only ever writes its own session line, so tracking different files - or even the same file open twice - doesn't clobber another instance's time. The total is simply the sum of every session line in the log.
 
+## Kitsu integration (optional)
+
+If [BB_Kitsu-Pipeline](https://github.com/riouxr/BB_Kitsu-Pipeline) is also installed, logged in, and the current file is stamped with a Kitsu task, Project Timer will automatically push today's tracked time to that task's Kitsu time-spent record every 60 seconds, alongside the local log.
+
+- No separate login or setup - it reuses BB_Kitsu-Pipeline's existing authenticated session and reads the task from the same scene stamp that add-on already writes. If that add-on isn't installed, isn't logged in, or the file has no task stamp, this is a silent no-op.
+- Kitsu's time-spent endpoint *replaces* a task's logged duration for a day rather than adding to it, so each push sends the full total tracked for that task **today** (not just the session's delta). This means a manual edit made directly in Kitsu for that task and day will be overwritten by the next automatic push.
+- You must be assigned to a task in Kitsu for it to accept time logged against it (a Kitsu/Zou permission rule, not something this add-on controls) - if you see "Kitsu task set, not logged in" or nothing changes in Kitsu, check the assignment there.
+- This reaches into BB_Kitsu-Pipeline's internal session object rather than a published API (it doesn't expose one), so a future update to that add-on could change or break this - failures there are caught and simply skip the Kitsu push, never crash the timer or the local log.
+
 ## Requirements
 
 Blender 4.5 or newer.

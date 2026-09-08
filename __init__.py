@@ -1,13 +1,14 @@
 import atexit
 import hashlib
 import os
+import sys
 import time
 import uuid
 
 import bpy
 from bpy.props import StringProperty
 
-ADDON_VERSION = "0.2.0"
+ADDON_VERSION = "0.3.0"
 
 IDLE_THRESHOLD = 60.0    # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0      # seconds between accounting ticks
@@ -124,6 +125,93 @@ def write_log(path, sessions, filepath):
     return total
 
 
+def _find_kitsu_module():
+    """The loaded BB_Kitsu-Pipeline module, if any.
+
+    Its Blender package is installed as an extension, so its module name is
+    namespaced (e.g. ``bl_ext.user_default.BB_pipeline``) rather than the
+    bare ``BB_pipeline`` - match on the suffix instead of hardcoding a key
+    into ``bpy.context.preferences.addons``.
+    """
+    for name, mod in list(sys.modules.items()):
+        if (name == "BB_pipeline" or name.endswith(".BB_pipeline")) and hasattr(mod, "session"):
+            return mod
+    return None
+
+
+def _get_kitsu_client():
+    """The pipeline add-on's already-authenticated Kitsu client, or None.
+
+    This is not a published API - it's reaching into another add-on's
+    internal session object. Any failure here (module missing, not logged
+    in, or the pipeline add-on restructured this on an update) just means
+    "nothing to sync", handled by the try/except in sync_kitsu().
+    """
+    mod = _find_kitsu_module()
+    if mod is None:
+        return None
+    client = mod.session.state.client
+    if not client or not client.logged_in:
+        return None
+    return client
+
+
+def _get_kitsu_task_id():
+    """The Kitsu task this file is stamped for, read from the scene.
+
+    BB_Kitsu-Pipeline stores this as a plain custom property on the Scene
+    (``scene["BB_pipeline"]``), independent of whether that add-on's own
+    Python module is currently loaded - the most stable way to read it.
+    """
+    scene = bpy.context.scene
+    ctx = scene.get("BB_pipeline") if scene else None
+    return ctx.get("task_id") if ctx else None
+
+
+def _today_seconds(sessions):
+    today = time.strftime("%Y-%m-%d")
+    total = 0.0
+    for s in sessions.values():
+        if time.strftime("%Y-%m-%d", time.localtime(s["start"])) == today:
+            total += s["seconds"]
+    return total
+
+
+def sync_kitsu(sessions):
+    """Push today's tracked total for the current task to Kitsu.
+
+    Best-effort and silent: no BB_Kitsu-Pipeline, not logged in, or no task
+    assigned to this file are all just "nothing to do", not errors - and
+    any Kitsu/network failure is swallowed so this integration can never
+    break the timer itself. Kitsu's time-spent endpoint *replaces* the
+    day's logged duration rather than adding to it, so this always sends
+    the full total tracked for today rather than this session's delta -
+    which also means a manual edit made directly in Kitsu for that task
+    and day will be overwritten on the next sync.
+    """
+    try:
+        client = _get_kitsu_client()
+        if client is None:
+            return
+        task_id = _get_kitsu_task_id()
+        if not task_id:
+            return
+        person = client.user or {}
+        person_id = person.get("id")
+        if not person_id:
+            return
+
+        minutes = int(round(_today_seconds(sessions) / 60.0))
+        date_str = time.strftime("%Y-%m-%d")
+        client._request(
+            "POST",
+            "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id),
+            json={"duration": minutes},
+        )
+    except Exception:
+        pass
+
+
 def sync_log(filepath):
     if not filepath or _state["session_id"] is None:
         return
@@ -141,6 +229,7 @@ def sync_log(filepath):
         "seconds": _state["session_seconds"],
     }
     _state["grand_total"] = write_log(path, sessions, filepath)
+    sync_kitsu(sessions)
 
 
 def flush_current():
@@ -311,6 +400,13 @@ class BBPT_PT_panel(bpy.types.Panel):
 
         layout.separator()
         layout.label(text=os.path.basename(get_log_path(filepath)), icon='FILE_TEXT')
+
+        task_id = _get_kitsu_task_id()
+        if task_id:
+            if _get_kitsu_client() is not None:
+                layout.label(text="Syncing to Kitsu", icon='CHECKMARK')
+            else:
+                layout.label(text="Kitsu task set, not logged in", icon='ERROR')
 
 
 classes = (
