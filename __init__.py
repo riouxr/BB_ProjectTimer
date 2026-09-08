@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.8.1"
+ADDON_VERSION = "0.9.0"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -318,20 +318,47 @@ def sync_kitsu(sessions):
 
         minutes = int(round(_today_seconds(sessions) / 60.0))
         date_str = time.strftime("%Y-%m-%d")
+        path = "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id)
+
         try:
-            client._request(
-                "POST",
-                "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id),
-                json={"duration": minutes},
-            )
+            client._request("POST", path, json={"duration": minutes})
             _state["kitsu_last_error"] = None
         except Exception as e:
-            _state["kitsu_last_error"] = str(e)
-            return  # don't attempt the start-date check off a failed sync
+            prefs = get_prefs()
+            auto_assign = prefs.kitsu_auto_assign if prefs else False
+            if auto_assign and _looks_like_not_assigned(e) and _try_kitsu_self_assign(client, task_id, person_id):
+                try:
+                    client._request("POST", path, json={"duration": minutes})
+                    _state["kitsu_last_error"] = None
+                except Exception as e2:
+                    _state["kitsu_last_error"] = str(e2)
+                    return
+            else:
+                _state["kitsu_last_error"] = str(e)
+                return  # don't attempt the start-date check off a failed sync
 
         _ensure_kitsu_real_start_date(client, task_id)
     except Exception as e:
         _state["kitsu_last_error"] = str(e)
+
+
+def _looks_like_not_assigned(error):
+    text = str(error)
+    return "403" in text or "not authorised" in text.lower()
+
+
+def _try_kitsu_self_assign(client, task_id, person_id):
+    """Assigns the current Kitsu user to a task, so time can be logged
+    against it. Only ever called when the "Auto-assign Me to Task"
+    preference is on - this changes shared production data (task
+    assignment is visible to the whole team), so it's opt-in, not a
+    default behaviour.
+    """
+    try:
+        client._request("PUT", "actions/persons/%s/assign" % person_id, json={"task_ids": [task_id]})
+        return True
+    except Exception:
+        return False
 
 
 # Task ids already checked/set this Blender session - real_start_date only
@@ -657,6 +684,19 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         default=True,
     )
 
+    kitsu_auto_assign: BoolProperty(
+        name="Auto-assign Me to Task",
+        description=(
+            "If a Kitsu sync fails because you're not assigned to the "
+            "current task, automatically assign yourself and retry, rather "
+            "than just showing the failure. Requires Kitsu permissions to "
+            "assign tasks. Off by default: this changes shared production "
+            "data (task assignment is visible to the whole team), so it "
+            "should be a deliberate choice, not a silent default"
+        ),
+        default=False,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "log_path")
@@ -670,6 +710,10 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "show_daily_breakdown")
         col.prop(self, "show_session_detail")
         col.prop(self, "log_usernames")
+
+        layout.separator()
+        col = layout.column(heading="Kitsu")
+        col.prop(self, "kitsu_auto_assign")
 
 
 class BBPT_PT_panel(bpy.types.Panel):
