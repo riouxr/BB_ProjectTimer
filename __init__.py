@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.5.0"
+ADDON_VERSION = "0.5.1"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -35,6 +35,12 @@ _state = {
     "last_save": 0.0,
     "paused": True,
     "running": False,
+    # Bumped on every file load. Loading a file can silently invalidate a
+    # running modal operator without Blender ever calling its cancel() -
+    # behaviour that has been observed to differ between Blender versions.
+    # A stale instance notices its generation no longer matches and cancels
+    # itself instead of us having to reliably detect that it already died.
+    "generation": 0,
 }
 
 
@@ -359,8 +365,14 @@ class BBPT_OT_modal_timer(bpy.types.Operator):
     bl_options = {'INTERNAL'}
 
     _wm_timer = None
+    _generation = -1
 
     def modal(self, context, event):
+        if self._generation != _state["generation"]:
+            # A newer file load has since started a fresh instance - this one
+            # is a leftover Blender didn't cleanly cancel, so stop ticking.
+            self._remove_timer(context)
+            return {'CANCELLED'}
         if not _state["running"]:
             return {'FINISHED'}
 
@@ -373,16 +385,21 @@ class BBPT_OT_modal_timer(bpy.types.Operator):
         return {'PASS_THROUGH'}
 
     def invoke(self, context, event):
+        self._generation = _state["generation"]
         self._wm_timer = context.window_manager.event_timer_add(TICK_INTERVAL, window=context.window)
         context.window_manager.modal_handler_add(self)
         _state["running"] = True
         return {'RUNNING_MODAL'}
 
     def cancel(self, context):
+        self._remove_timer(context)
+        if _state["generation"] == self._generation:
+            _state["running"] = False
+
+    def _remove_timer(self, context):
         if self._wm_timer is not None:
             context.window_manager.event_timer_remove(self._wm_timer)
             self._wm_timer = None
-        _state["running"] = False
 
 
 def _redraw_timer_panels(context):
@@ -403,8 +420,36 @@ def ensure_modal_running():
 
 def _start_modal_deferred():
     reset_state_for_current_file()
+
+    # Loading a file can silently invalidate a running modal operator without
+    # Blender calling its cancel() - observed to vary between Blender
+    # versions. Bumping the generation and clearing the flag here forces a
+    # fresh operator on every load rather than trusting a possibly-stale
+    # "already running" flag; if the old instance somehow is still alive, its
+    # next event will see the generation mismatch and cancel itself, so this
+    # never ends up with two instances double-counting time either.
+    _state["generation"] += 1
+    _state["running"] = False
     ensure_modal_running()
     return None  # one-shot
+
+
+WATCHDOG_INTERVAL = 5.0  # seconds between liveness checks
+
+
+def _watchdog():
+    """Restarts the modal if it stops ticking for any reason other than a
+    file load (which on_load_post already handles) - e.g. some other
+    operator taking over the modal stack. tick() runs every TICK_INTERVAL
+    regardless of idle/pause state, so a stall here means the operator
+    itself died, not just that the user went idle.
+    """
+    if _state["session_id"] is not None and _state["running"]:
+        if time.time() - _state["last_tick"] > TICK_INTERVAL * 5:
+            _state["generation"] += 1
+            _state["running"] = False
+            ensure_modal_running()
+    return WATCHDOG_INTERVAL
 
 
 def on_load_pre(dummy1, dummy2):
@@ -553,10 +598,19 @@ def register():
     # Blender may already have a file loaded when the add-on is enabled.
     bpy.app.timers.register(_start_modal_deferred, first_interval=0.0)
 
+    # persistent=True: this must keep running across file loads without
+    # being re-armed by on_load_post, since it's what catches the modal
+    # failing to restart in the first place.
+    if not bpy.app.timers.is_registered(_watchdog):
+        bpy.app.timers.register(_watchdog, first_interval=WATCHDOG_INTERVAL, persistent=True)
+
 
 def unregister():
     _state["running"] = False
     flush_current()
+
+    if bpy.app.timers.is_registered(_watchdog):
+        bpy.app.timers.unregister(_watchdog)
 
     try:
         atexit.unregister(flush_current)

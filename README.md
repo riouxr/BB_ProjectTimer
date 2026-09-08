@@ -39,4 +39,6 @@ Download the latest release zip and install it via **Edit > Preferences > Get Ex
 
 This is not tamper-proof: anyone who can disable add-ons in Preferences or edit the installed files can stop tracking. It removes the easy "just click stop" path but is not hardened against a determined user.
 
-If the *same* file is open in two Blender instances at once and both save within the same instant, one instance's on-disk line can be briefly overwritten by the other's - but since each instance rewrites its own line again every 60 seconds, this self-heals within a minute and no time is permanently lost.
+If the *same* file is open in two Blender instances at once and both save within the same instant, one instance's on-disk line can be briefly overwritten by the other's - but since each instance rewrites its own line again every save interval, this self-heals and no time is permanently lost.
+
+Loading or opening a file can silently invalidate a running modal operator, and this has been observed to behave differently across Blender versions - without a fix, that can leave the timer stuck showing a stale, frozen value after a file switch. A generation-counter mechanism plus a background watchdog (checked every 5 seconds) detects this and restarts tracking automatically, without double-counting time from the old instance.
