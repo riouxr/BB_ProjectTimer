@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.9.1"
+ADDON_VERSION = "0.9.2"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -378,14 +378,20 @@ def _ensure_kitsu_real_start_date(client, task_id):
     """
     if task_id in _kitsu_start_date_checked:
         return
-    _kitsu_start_date_checked.add(task_id)
 
-    task = client.task(task_id)
-    if task and not task.get("real_start_date"):
-        client._request(
-            "PUT", "data/tasks/%s" % task_id,
-            json={"real_start_date": time.strftime("%Y-%m-%d")},
-        )
+    # Only cache once we actually know the outcome - caching before this
+    # would mean a transient failure here (network hiccup, timing) gets
+    # marked "done" and never retried, even though nothing was ever set.
+    try:
+        task = client.task(task_id)
+        if task and not task.get("real_start_date"):
+            client._request(
+                "PUT", "data/tasks/%s" % task_id,
+                json={"real_start_date": time.strftime("%Y-%m-%d")},
+            )
+        _kitsu_start_date_checked.add(task_id)
+    except Exception:
+        pass  # leave uncached so the next successful sync retries this
 
 
 def sync_log(filepath):
@@ -430,6 +436,10 @@ def reset_state_for_current_file():
     _state["last_save"] = now
     _state["paused"] = False
     _state["kitsu_task_id"] = _get_kitsu_task_id()
+    # A stale error from flushing the *previous* file on the way out (via
+    # on_load_pre) must not be shown against this file - it hasn't been
+    # synced yet, so it has no error of its own until its own attempt runs.
+    _state["kitsu_last_error"] = None
 
     if filepath:
         sessions = parse_sessions(get_log_path(filepath))
