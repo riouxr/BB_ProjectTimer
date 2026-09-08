@@ -7,7 +7,7 @@ A Blender extension that automatically tracks time spent working on a `.blend` f
 - Starts automatically when a file is loaded - there is no manual start/stop control, so it can't be toggled off from the UI.
 - Counts time as active only while there is mouse-click activity; if there's no click for 60 seconds, tracking pauses.
 - Saves progress to a `<blendfile>_time.txt` log file every 60 seconds and on file switch/quit, so a crash loses at most ~1 minute of tracked time.
-- Every time you reopen the file, a new **session** starts. The log keeps one line per session (start, end, duration) plus the running total across all sessions, so you can see both today's time and lifetime project time.
+- Every time you reopen the file, a new **session** starts. The log keeps one line per session (start, end, duration), grouped and totalled per day, plus the running total across all sessions - so you can see today's time, any past day's time, and lifetime project time.
 - Shows live status, this session's time, and the file's total time in the 3D Viewport sidebar (N-panel), under the **Tool** tab.
 - The log location is configurable in the add-on preferences (**Log Folder**). Leave it empty to save next to each `.blend` file (default), or point it at a shared folder to collect logs from many projects in one place.
 - Safe with several Blender instances open at once: each instance only ever writes its own session line, so tracking different files - or even the same file open twice - doesn't clobber another instance's time. The total is simply the sum of every session line in the log.

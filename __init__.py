@@ -8,7 +8,7 @@ import uuid
 import bpy
 from bpy.props import StringProperty
 
-ADDON_VERSION = "0.3.0"
+ADDON_VERSION = "0.4.0"
 
 IDLE_THRESHOLD = 60.0    # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0      # seconds between accounting ticks
@@ -103,6 +103,19 @@ def parse_sessions(path):
     return sessions
 
 
+def _group_by_day(ordered):
+    """Session list -> [(date_str, day_total_seconds, [sessions]), ...], oldest first."""
+    days = {}
+    order = []
+    for s in ordered:
+        date_str = time.strftime("%Y-%m-%d", time.localtime(s["start"]))
+        if date_str not in days:
+            days[date_str] = []
+            order.append(date_str)
+        days[date_str].append(s)
+    return [(d, sum(s["seconds"] for s in days[d]), days[d]) for d in order]
+
+
 def write_log(path, sessions, filepath):
     ordered = sorted(sessions.values(), key=lambda s: s["start"])
     total = sum(s["seconds"] for s in ordered)
@@ -115,11 +128,19 @@ def write_log(path, sessions, filepath):
                     s["sid"], s["start"], s["end"], s["seconds"]))
             f.write("\n")
             f.write("Total time on %s: %s\n\n" % (os.path.basename(filepath), format_hms(total)))
+
+            f.write("By day:\n")
+            for date_str, day_total, _day_sessions in _group_by_day(ordered):
+                f.write("  %s   %s\n" % (date_str, format_hms(day_total)))
+            f.write("\n")
+
             f.write("Sessions:\n")
-            for s in ordered:
-                start_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["start"]))
-                end_str = time.strftime("%H:%M", time.localtime(s["end"]))
-                f.write("  %s - %s   %s\n" % (start_str, end_str, format_hms(s["seconds"])))
+            for date_str, _day_total, day_sessions in _group_by_day(ordered):
+                f.write("  %s\n" % date_str)
+                for s in day_sessions:
+                    start_str = time.strftime("%H:%M", time.localtime(s["start"]))
+                    end_str = time.strftime("%H:%M", time.localtime(s["end"]))
+                    f.write("    %s - %s   %s\n" % (start_str, end_str, format_hms(s["seconds"])))
     except OSError:
         pass
     return total
