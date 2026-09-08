@@ -1,4 +1,5 @@
 import atexit
+import csv
 import getpass
 import hashlib
 import os
@@ -9,7 +10,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.9.4"
+ADDON_VERSION = "0.10.0"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -95,7 +96,9 @@ def get_log_dir(filepath):
     return os.path.dirname(filepath)
 
 
-def get_log_path(filepath):
+def _log_name_stem(filepath):
+    """The collision-safe "<...>_time" base name shared by the .txt log and
+    the optional .csv export, without either extension."""
     prefs = get_prefs()
     custom = prefs.log_path.strip() if prefs else ""
     stem = os.path.splitext(os.path.basename(filepath))[0]
@@ -107,10 +110,16 @@ def get_log_path(filepath):
         parent = os.path.basename(os.path.dirname(filepath)).strip()
         src_dir = os.path.normcase(os.path.abspath(os.path.dirname(filepath)))
         tag = hashlib.sha1(src_dir.encode("utf-8")).hexdigest()[:8]
-        name = "%s_%s_%s_time.txt" % (parent, stem, tag) if parent else "%s_%s_time.txt" % (stem, tag)
-    else:
-        name = "%s_time.txt" % stem
-    return os.path.join(get_log_dir(filepath), name)
+        return "%s_%s_%s_time" % (parent, stem, tag) if parent else "%s_%s_time" % (stem, tag)
+    return "%s_time" % stem
+
+
+def get_log_path(filepath):
+    return os.path.join(get_log_dir(filepath), _log_name_stem(filepath) + ".txt")
+
+
+def get_csv_path(filepath):
+    return os.path.join(get_log_dir(filepath), _log_name_stem(filepath) + ".csv")
 
 
 def format_hms(seconds):
@@ -230,6 +239,30 @@ def write_log(path, sessions, filepath):
     except OSError:
         pass
     return total
+
+
+def write_csv(path, sessions, filepath):
+    """One row per session - deliberately flat and unaggregated, unlike the
+    .txt log's by-day/by-user summaries, so it drops straight into Excel/
+    Sheets for whatever totals or charts someone wants to build themselves.
+    """
+    ordered = sorted(sessions.values(), key=lambda s: s["start"])
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["File", "Date", "Start", "End", "Duration (H:MM:SS)", "Duration (seconds)", "User"])
+            for s in ordered:
+                writer.writerow([
+                    os.path.basename(filepath),
+                    time.strftime("%Y-%m-%d", time.localtime(s["start"])),
+                    time.strftime("%H:%M:%S", time.localtime(s["start"])),
+                    time.strftime("%H:%M:%S", time.localtime(s["end"])),
+                    format_hms(s["seconds"]),
+                    "%.1f" % s["seconds"],
+                    s.get("user", ""),
+                ])
+    except OSError:
+        pass
 
 
 def _find_kitsu_module():
@@ -455,6 +488,10 @@ def sync_log(filepath):
         "user": _state["username"] if log_usernames else "",
     }
     _state["grand_total"] = write_log(path, sessions, filepath)
+
+    if prefs.export_csv if prefs else False:
+        write_csv(get_csv_path(filepath), sessions, filepath)
+
     sync_kitsu(sessions)
 
 
@@ -752,6 +789,18 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         default=True,
     )
 
+    export_csv: BoolProperty(
+        name="Also Save CSV",
+        description=(
+            "Write a companion <blendfile>_time.csv file alongside the log, "
+            "one row per session (date, start, end, duration, user) - "
+            "handy for importing into Excel/Sheets to build your own totals "
+            "or charts. The text log already shows everything on its own; "
+            "this is only useful if you want the raw data elsewhere"
+        ),
+        default=False,
+    )
+
     kitsu_auto_assign: BoolProperty(
         name="Auto-assign Me to Task",
         description=(
@@ -792,6 +841,7 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "show_daily_breakdown")
         col.prop(self, "show_session_detail")
         col.prop(self, "log_usernames")
+        col.prop(self, "export_csv")
 
         layout.separator()
         col = layout.column(heading="Kitsu")
@@ -830,6 +880,9 @@ class BBPT_PT_panel(bpy.types.Panel):
 
         layout.separator()
         layout.label(text=os.path.basename(get_log_path(filepath)), icon='FILE_TEXT')
+        prefs = get_prefs()
+        if prefs and prefs.export_csv:
+            layout.label(text=os.path.basename(get_csv_path(filepath)), icon='FILE_TEXT')
 
         task_id = _get_kitsu_task_id()
         if task_id:
