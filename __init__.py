@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.7.1"
+ADDON_VERSION = "0.7.2"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -188,13 +188,6 @@ def write_log(path, sessions, filepath):
     total = sum(s["seconds"] for s in ordered)
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write("# BB Project Timer log - machine-readable lines below, do not edit by hand\n")
-            f.write("TOTAL=%.1f\n" % total)
-            for s in ordered:
-                user_field = " user=%s" % s["user"].replace(" ", "_") if s.get("user") else ""
-                f.write("SESSION sid=%s start=%.1f end=%.1f seconds=%.1f%s\n" % (
-                    s["sid"], s["start"], s["end"], s["seconds"], user_field))
-            f.write("\n")
             f.write("Total time on %s: %s\n\n" % (os.path.basename(filepath), format_hms(total)))
 
             if show_users:
@@ -221,6 +214,17 @@ def write_log(path, sessions, filepath):
                         end_str = time.strftime("%H:%M", time.localtime(s["end"]))
                         who = "   %s" % s["user"] if show_users and s.get("user") else ""
                         f.write("    %s - %s   %s%s\n" % (start_str, end_str, format_hms(s["seconds"]), who))
+                f.write("\n")
+
+            # Machine-readable data last - this is what parse_sessions() reads
+            # back, but nobody reading the file cares about it, so it doesn't
+            # belong at the top pushing the actual numbers off screen.
+            f.write("# BB Project Timer data below - do not edit by hand\n")
+            f.write("TOTAL=%.1f\n" % total)
+            for s in ordered:
+                user_field = " user=%s" % s["user"].replace(" ", "_") if s.get("user") else ""
+                f.write("SESSION sid=%s start=%.1f end=%.1f seconds=%.1f%s\n" % (
+                    s["sid"], s["start"], s["end"], s["seconds"], user_field))
     except OSError:
         pass
     return total
