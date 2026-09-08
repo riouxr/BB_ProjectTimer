@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.9.0"
+ADDON_VERSION = "0.9.1"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -43,6 +43,7 @@ _state = {
     # itself instead of us having to reliably detect that it already died.
     "generation": 0,
     "kitsu_last_error": None,  # None = last Kitsu sync attempt (if any) succeeded
+    "kitsu_task_id": None,     # the Kitsu task this session started against, if any
 }
 
 
@@ -428,6 +429,7 @@ def reset_state_for_current_file():
     _state["last_click"] = now
     _state["last_save"] = now
     _state["paused"] = False
+    _state["kitsu_task_id"] = _get_kitsu_task_id()
 
     if filepath:
         sessions = parse_sessions(get_log_path(filepath))
@@ -598,11 +600,27 @@ def on_save_post(dummy1, dummy2):
     if not filepath:
         return
 
-    # "File > Save" on a file that had no path yet, and "Save As", both
-    # change bpy.data.filepath without going through load_post - point
-    # tracking at the new path, carrying over what's accumulated so far.
     if filepath != _state["log_filepath"]:
-        _state["log_filepath"] = filepath
+        old_filepath = _state["log_filepath"]
+        new_task_id = _get_kitsu_task_id()
+
+        # A pipeline tool (e.g. BB_Kitsu-Pipeline's "create file from
+        # current") can Save As to a new path for a genuinely different
+        # task - e.g. spinning off a Shading file from a Modeling one -
+        # without ever going through load_post, so reset_state_for_current_
+        # file() never runs and the timer just keeps counting the old
+        # task's time under the new path. Kitsu's task stamp is the only
+        # reliable signal to tell that apart from an ordinary rename/
+        # relocate, where carrying the accumulated time over is correct.
+        if new_task_id and new_task_id != _state["kitsu_task_id"]:
+            if old_filepath:
+                sync_log(old_filepath)  # final write to the file being left behind
+            reset_state_for_current_file()
+        else:
+            # Ordinary "File > Save" on a file that had no path yet, or a
+            # plain rename/relocate - same work, just point tracking at the
+            # new path and carry over what's accumulated so far.
+            _state["log_filepath"] = filepath
 
     # Every save is a natural checkpoint - flush the log now rather than
     # waiting out the autosave interval, so what's on disk always reflects
