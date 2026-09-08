@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.9.3"
+ADDON_VERSION = "0.9.4"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -392,32 +392,46 @@ _kitsu_start_date_checked = set()
 
 
 def _ensure_kitsu_real_start_date(client, task_id):
-    """Sets the task's real_start_date to today the first time this add-on
-    logs time against it, if Kitsu hasn't already recorded one. Zou doesn't
-    set this automatically just from time being logged - real_start_date
-    is meant to mean "when work actually began," which is exactly what
-    tracked time represents, so it's a natural thing to fill in rather than
-    leave null. Never overwrites an existing value.
+    """Sets the task's real_start_date (and, if the "Set Kitsu Start Date"
+    preference is on, also start_date) to today the first time this add-on
+    logs time against it, for whichever of those fields Kitsu doesn't
+    already have a value for. Zou doesn't set real_start_date
+    automatically just from time being logged - it's meant to mean "when
+    work actually began," which is exactly what tracked time represents,
+    so it's filled in by default rather than left null.
+
+    start_date is Kitsu's own convention for a planned/scheduled date set
+    by production management, not when work actually began - a different
+    meaning, and one another user of this add-on might depend on staying
+    empty until a producer sets it. So it's opt-in, only touched when
+    explicitly asked for. Neither field is ever overwritten once set.
     """
     if task_id in _kitsu_start_date_checked:
         return
+
+    prefs = get_prefs()
+    also_start_date = prefs.kitsu_set_start_date if prefs else False
+    today = time.strftime("%Y-%m-%d")
 
     # Only cache once we actually know the outcome - caching before this
     # would mean a transient failure here (network hiccup, timing) gets
     # marked "done" and never retried, even though nothing was ever set.
     try:
         task = client.task(task_id)
+        updates = {}
         if task and not task.get("real_start_date"):
-            client._request(
-                "PUT", "data/tasks/%s" % task_id,
-                json={"real_start_date": time.strftime("%Y-%m-%d")},
-            )
-            _kitsu_log("set real_start_date on task_id=%s" % task_id)
+            updates["real_start_date"] = today
+        if also_start_date and task and not task.get("start_date"):
+            updates["start_date"] = today
+
+        if updates:
+            client._request("PUT", "data/tasks/%s" % task_id, json=updates)
+            _kitsu_log("set %s on task_id=%s" % (", ".join(updates), task_id))
         else:
-            _kitsu_log("real_start_date already set on task_id=%s - leaving it" % task_id)
+            _kitsu_log("start date(s) already set on task_id=%s - leaving them" % task_id)
         _kitsu_start_date_checked.add(task_id)
     except Exception as e:
-        _kitsu_log("real_start_date check/set FAILED (will retry next sync): %s" % e)
+        _kitsu_log("start date check/set FAILED (will retry next sync): %s" % e)
 
 
 def sync_log(filepath):
@@ -751,6 +765,20 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         default=False,
     )
 
+    kitsu_set_start_date: BoolProperty(
+        name="Set Kitsu Start Date",
+        description=(
+            "Also set the task's Start Date (not just Real Start Date) to "
+            "today on the first successful sync, if Kitsu doesn't already "
+            "have one. Kitsu's own convention is that Start Date is a "
+            "planned/scheduled date set by production management, not when "
+            "work actually began - only turn this on if you want to "
+            "repurpose it as your own actual-start date instead. Never "
+            "overwrites an existing value"
+        ),
+        default=False,
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "log_path")
@@ -768,6 +796,7 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         layout.separator()
         col = layout.column(heading="Kitsu")
         col.prop(self, "kitsu_auto_assign")
+        col.prop(self, "kitsu_set_start_date")
 
 
 class BBPT_PT_panel(bpy.types.Panel):

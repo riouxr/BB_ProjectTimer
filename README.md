@@ -19,6 +19,7 @@ A Blender extension that automatically tracks time spent working on a `.blend` f
 - **Show Daily Breakdown** / **Show Session Times** - hide the per-day or per-session readable sections in the log if that's more detail than you want visible. The underlying per-session record is always kept either way - this only affects the readable text, not what's tracked, since the totals and multi-instance syncing depend on it staying complete.
 - **Log Usernames** - tag each session with the OS username that logged it, and show a per-user total. Turn off to keep the log anonymous; no username is written while it's off.
 - **Auto-assign Me to Task** - if a Kitsu sync fails because you're not assigned to the current task, automatically assign yourself and retry, instead of just showing the failure. Requires Kitsu permission to assign tasks. **Off by default** - this changes shared production data (task assignment is visible to the whole team), so it's a deliberate opt-in rather than a silent default.
+- **Set Kitsu Start Date** - also set the task's Start Date (not just Real Start Date) to today on the first successful sync, if Kitsu doesn't have one. Kitsu's own convention is that Start Date is a planned/scheduled date set by production management - **off by default** since another user of this add-on might rely on it staying empty until a producer sets it. Turn this on only if you want to repurpose it as your own actual-start date. Never overwrites an existing value.
 
 ## Kitsu integration (optional)
 
