@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.6.0"
+ADDON_VERSION = "0.6.1"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -482,15 +482,26 @@ WATCHDOG_INTERVAL = 5.0  # seconds between liveness checks
 def _watchdog():
     """Restarts the modal if it stops ticking for any reason other than a
     file load (which on_load_post already handles) - e.g. some other
-    operator taking over the modal stack. tick() runs every TICK_INTERVAL
-    regardless of idle/pause state, so a stall here means the operator
-    itself died, not just that the user went idle.
+    operator taking over the modal stack, or Blender cancelling it and
+    correctly clearing "running" but nothing then restarting it. tick()
+    runs every TICK_INTERVAL regardless of idle/pause state, so a stall
+    here means the operator itself died, not just that the user went idle.
+
+    Deliberately does not require _state["running"] to already be True: a
+    modal that was cleanly cancelled (running already False) needs exactly
+    the same restart as one that died without telling us - checking only
+    the "still marked running but stale" case left that first one stuck
+    forever, which is what actually happened in practice.
     """
-    if _state["session_id"] is not None and _state["running"]:
-        if time.time() - _state["last_tick"] > TICK_INTERVAL * 5:
-            _state["generation"] += 1
-            _state["running"] = False
-            ensure_modal_running()
+    if _state["session_id"] is None:
+        return WATCHDOG_INTERVAL
+
+    if _state["running"] and time.time() - _state["last_tick"] <= TICK_INTERVAL * 5:
+        return WATCHDOG_INTERVAL  # ticking normally, nothing to do
+
+    _state["generation"] += 1
+    _state["running"] = False
+    ensure_modal_running()
     return WATCHDOG_INTERVAL
 
 
