@@ -9,7 +9,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.7.2"
+ADDON_VERSION = "0.8.0"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -313,8 +313,35 @@ def sync_kitsu(sessions):
             "actions/tasks/%s/time-spents/%s/persons/%s" % (task_id, date_str, person_id),
             json={"duration": minutes},
         )
+        _ensure_kitsu_real_start_date(client, task_id)
     except Exception:
         pass
+
+
+# Task ids already checked/set this Blender session - real_start_date only
+# needs setting once per task, ever, so this avoids an extra request on
+# every single sync once that's been confirmed.
+_kitsu_start_date_checked = set()
+
+
+def _ensure_kitsu_real_start_date(client, task_id):
+    """Sets the task's real_start_date to today the first time this add-on
+    logs time against it, if Kitsu hasn't already recorded one. Zou doesn't
+    set this automatically just from time being logged - real_start_date
+    is meant to mean "when work actually began," which is exactly what
+    tracked time represents, so it's a natural thing to fill in rather than
+    leave null. Never overwrites an existing value.
+    """
+    if task_id in _kitsu_start_date_checked:
+        return
+    _kitsu_start_date_checked.add(task_id)
+
+    task = client.task(task_id)
+    if task and not task.get("real_start_date"):
+        client._request(
+            "PUT", "data/tasks/%s" % task_id,
+            json={"real_start_date": time.strftime("%Y-%m-%d")},
+        )
 
 
 def sync_log(filepath):

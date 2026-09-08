@@ -26,6 +26,8 @@ If [BB_Kitsu-Pipeline](https://github.com/riouxr/BB_Kitsu-Pipeline) is also inst
 - Kitsu's time-spent endpoint *replaces* a task's logged duration for a day rather than adding to it, so each push sends the full total tracked for that task **today** (not just the session's delta). This means a manual edit made directly in Kitsu for that task and day will be overwritten by the next automatic push.
 - You must be assigned to a task in Kitsu for it to accept time logged against it (a Kitsu/Zou permission rule, not something this add-on controls) - if you see "Kitsu task set, not logged in" or nothing changes in Kitsu, check the assignment there.
 - This reaches into BB_Kitsu-Pipeline's internal session object rather than a published API (it doesn't expose one), so a future update to that add-on could change or break this - failures there are caught and simply skip the Kitsu push, never crash the timer or the local log.
+- On the first successful sync for a task, if Kitsu has no `real_start_date` recorded for it yet, this sets it to today - Zou doesn't fill that in automatically just from time being logged, and it's meant to mean "when work actually began," which is exactly what tracked time represents. Never overwrites an existing value.
+- Kitsu commonly displays duration in hours or days rather than minutes, so a few minutes of tracked time can round down to a visibly unchanged "0" in the UI even though the underlying record is correct - this isn't a sync failure, just a display rounding effect for small amounts of time.
 
 ## Requirements
 
