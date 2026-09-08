@@ -1,19 +1,32 @@
 import atexit
+import hashlib
 import os
 import time
+import uuid
 
 import bpy
+from bpy.props import StringProperty
 
-ADDON_VERSION = "0.1.0"
+ADDON_VERSION = "0.2.0"
 
 IDLE_THRESHOLD = 60.0    # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0      # seconds between accounting ticks
-SAVE_INTERVAL = 60.0     # seconds between autosaves to the sidecar file
+SAVE_INTERVAL = 60.0     # seconds between autosaves to the log file
 
 # Module-level state - not stored as bpy properties since it needs to keep
 # ticking via a modal operator/timer regardless of which object/scene is active.
+#
+# Each time a file is loaded a new session_id is generated. Every Blender
+# instance only ever writes its own session's line in the log file, so
+# opening several files (or the same file) in several Blender instances at
+# once does not clobber another instance's tracked time - each instance's
+# entry is independent and the total is the sum of all entries.
 _state = {
-    "total_seconds": 0.0,
+    "session_id": None,
+    "log_filepath": None,     # the .blend path the current session is logged against
+    "session_start": 0.0,
+    "session_seconds": 0.0,
+    "grand_total": 0.0,       # session_seconds + every other session's seconds, from the log file
     "last_tick": 0.0,
     "last_click": 0.0,
     "last_save": 0.0,
@@ -22,9 +35,35 @@ _state = {
 }
 
 
-def get_sidecar_path(filepath):
-    base, _ext = os.path.splitext(filepath)
-    return base + "_time.txt"
+def get_prefs():
+    addon = bpy.context.preferences.addons.get(__name__)
+    return addon.preferences if addon else None
+
+
+def get_log_dir(filepath):
+    prefs = get_prefs()
+    custom = prefs.log_path.strip() if prefs else ""
+    if custom:
+        return bpy.path.abspath(custom)
+    return os.path.dirname(filepath)
+
+
+def get_log_path(filepath):
+    prefs = get_prefs()
+    custom = prefs.log_path.strip() if prefs else ""
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    if custom:
+        # Several projects may share one custom log folder. The parent folder
+        # name alone isn't unique enough (e.g. ProjectA/Shots/Shot010 and
+        # ProjectB/Shots/Shot010), so tag the name with a short hash of the
+        # full source directory to guarantee no two different files collide.
+        parent = os.path.basename(os.path.dirname(filepath)).strip()
+        src_dir = os.path.normcase(os.path.abspath(os.path.dirname(filepath)))
+        tag = hashlib.sha1(src_dir.encode("utf-8")).hexdigest()[:8]
+        name = "%s_%s_%s_time.txt" % (parent, stem, tag) if parent else "%s_%s_time.txt" % (stem, tag)
+    else:
+        name = "%s_time.txt" % stem
+    return os.path.join(get_log_dir(filepath), name)
 
 
 def format_hms(seconds):
@@ -34,47 +73,98 @@ def format_hms(seconds):
     return "%d:%02d:%02d" % (h, m, s)
 
 
-def load_saved_total(filepath):
-    path = get_sidecar_path(filepath)
+def parse_sessions(path):
+    """Returns {session_id: {"sid", "start", "end", "seconds"}}."""
+    sessions = {}
     if not os.path.isfile(path):
-        return 0.0
+        return sessions
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
-                if line.startswith("SECONDS="):
-                    return float(line.strip().split("=", 1)[1])
-    except (OSError, ValueError):
+                if not line.startswith("SESSION "):
+                    continue
+                fields = {}
+                for part in line.strip().split()[1:]:
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        fields[k] = v
+                try:
+                    sessions[fields["sid"]] = {
+                        "sid": fields["sid"],
+                        "start": float(fields["start"]),
+                        "end": float(fields["end"]),
+                        "seconds": float(fields["seconds"]),
+                    }
+                except (KeyError, ValueError):
+                    continue
+    except OSError:
         pass
-    return 0.0
+    return sessions
 
 
-def save_total(filepath, total_seconds):
-    if not filepath:
-        return
-    path = get_sidecar_path(filepath)
+def write_log(path, sessions, filepath):
+    ordered = sorted(sessions.values(), key=lambda s: s["start"])
+    total = sum(s["seconds"] for s in ordered)
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write("SECONDS=%.1f\n" % total_seconds)
-            f.write("Time spent on %s: %s\n" % (os.path.basename(filepath), format_hms(total_seconds)))
-            f.write("Last updated: %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            f.write("# BB Project Timer log - machine-readable lines below, do not edit by hand\n")
+            f.write("TOTAL=%.1f\n" % total)
+            for s in ordered:
+                f.write("SESSION sid=%s start=%.1f end=%.1f seconds=%.1f\n" % (
+                    s["sid"], s["start"], s["end"], s["seconds"]))
+            f.write("\n")
+            f.write("Total time on %s: %s\n\n" % (os.path.basename(filepath), format_hms(total)))
+            f.write("Sessions:\n")
+            for s in ordered:
+                start_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(s["start"]))
+                end_str = time.strftime("%H:%M", time.localtime(s["end"]))
+                f.write("  %s - %s   %s\n" % (start_str, end_str, format_hms(s["seconds"])))
+    except OSError:
+        pass
+    return total
+
+
+def sync_log(filepath):
+    if not filepath or _state["session_id"] is None:
+        return
+    path = get_log_path(filepath)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     except OSError:
         pass
 
+    sessions = parse_sessions(path)
+    sessions[_state["session_id"]] = {
+        "sid": _state["session_id"],
+        "start": _state["session_start"],
+        "end": time.time(),
+        "seconds": _state["session_seconds"],
+    }
+    _state["grand_total"] = write_log(path, sessions, filepath)
+
 
 def flush_current():
-    filepath = bpy.data.filepath
-    if filepath:
-        save_total(filepath, _state["total_seconds"])
+    sync_log(_state["log_filepath"])
 
 
 def reset_state_for_current_file():
     filepath = bpy.data.filepath
     now = time.time()
-    _state["total_seconds"] = load_saved_total(filepath) if filepath else 0.0
+
+    _state["session_id"] = uuid.uuid4().hex[:8]
+    _state["log_filepath"] = filepath
+    _state["session_start"] = now
+    _state["session_seconds"] = 0.0
     _state["last_tick"] = now
     _state["last_click"] = now
     _state["last_save"] = now
     _state["paused"] = False
+
+    if filepath:
+        sessions = parse_sessions(get_log_path(filepath))
+        _state["grand_total"] = sum(s["seconds"] for s in sessions.values())
+    else:
+        _state["grand_total"] = 0.0
 
 
 def tick():
@@ -86,7 +176,8 @@ def tick():
     _state["paused"] = idle > IDLE_THRESHOLD
 
     if not _state["paused"]:
-        _state["total_seconds"] += dt
+        _state["session_seconds"] += dt
+        _state["grand_total"] += dt
 
     if now - _state["last_save"] >= SAVE_INTERVAL:
         _state["last_save"] = now
@@ -163,6 +254,35 @@ def on_load_post(dummy1, dummy2):
     bpy.app.timers.register(_start_modal_deferred, first_interval=0.0)
 
 
+def on_save_post(dummy1, dummy2):
+    # Covers "File > Save" on a file that had no path yet, and "Save As" -
+    # both change bpy.data.filepath without going through load_post. The
+    # time already accumulated this session carries over to the new path.
+    filepath = bpy.data.filepath
+    if filepath and filepath != _state["log_filepath"]:
+        _state["log_filepath"] = filepath
+        sync_log(filepath)
+
+
+class BBPT_AddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+
+    log_path: StringProperty(
+        name="Log Folder",
+        description=(
+            "Folder where the time-tracking log is saved. "
+            "Leave empty to save it next to the .blend file"
+        ),
+        subtype='DIR_PATH',
+        default="",
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "log_path")
+        layout.label(text="Leave empty to save the log next to each .blend file", icon='INFO')
+
+
 class BBPT_PT_panel(bpy.types.Panel):
     bl_label = "Project Timer"
     bl_idname = "BBPT_PT_panel"
@@ -183,15 +303,19 @@ class BBPT_PT_panel(bpy.types.Panel):
         layout.label(text=status, icon=icon)
 
         col = layout.column()
-        col.label(text="Time on this file:")
-        col.label(text=format_hms(_state["total_seconds"]))
+        col.label(text="This session:")
+        col.label(text=format_hms(_state["session_seconds"]))
+        col.separator()
+        col.label(text="Total on this file:")
+        col.label(text=format_hms(_state["grand_total"]))
 
         layout.separator()
-        layout.label(text=os.path.basename(get_sidecar_path(filepath)), icon='FILE_TEXT')
+        layout.label(text=os.path.basename(get_log_path(filepath)), icon='FILE_TEXT')
 
 
 classes = (
     BBPT_OT_modal_timer,
+    BBPT_AddonPreferences,
     BBPT_PT_panel,
 )
 
@@ -202,6 +326,7 @@ def register():
 
     bpy.app.handlers.load_pre.append(on_load_pre)
     bpy.app.handlers.load_post.append(on_load_post)
+    bpy.app.handlers.save_post.append(on_save_post)
     atexit.register(flush_current)
 
     # Blender may already have a file loaded when the add-on is enabled.
@@ -221,6 +346,8 @@ def unregister():
         bpy.app.handlers.load_pre.remove(on_load_pre)
     if on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(on_load_post)
+    if on_save_post in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.remove(on_save_post)
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
