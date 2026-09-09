@@ -3,6 +3,7 @@ import csv
 import getpass
 import hashlib
 import os
+import re
 import sys
 import time
 import uuid
@@ -10,7 +11,7 @@ import uuid
 import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty
 
-ADDON_VERSION = "0.10.1"
+ADDON_VERSION = "0.11.0"
 
 IDLE_THRESHOLD = 60.0             # seconds with no mouse click before the timer pauses
 TICK_INTERVAL = 1.0               # seconds between accounting ticks
@@ -189,17 +190,92 @@ def _group_by_user(ordered):
     return [(name, users[name]) for name in order]
 
 
+VERSION_SUFFIX_RE = re.compile(r"^(.*?)(\d+)$")
+
+
+def _version_base_and_number(stem):
+    """Splits a filename stem into (base, number-string) on its trailing
+    digit run, or (None, None) if it doesn't end in digits.
+
+    One pattern covers both Blender's native Save Incremental (name_001,
+    name_002, ...) and BB_Kitsu-Pipeline's versioning (name_v001, name_v002,
+    ...) - the "v" is just part of the invariant base string either way,
+    so grouping only needs "same text before the trailing number."
+    """
+    m = VERSION_SUFFIX_RE.match(stem)
+    if not m:
+        return None, None
+    return m.group(1), m.group(2)
+
+
+def find_version_totals(filepath, this_version_total):
+    """[(number_string, total_seconds, is_this_file), ...], sorted by
+    version number, for every sibling in the same folder whose name
+    matches this file's "<base><digits><ext>" pattern. this_version_total
+    is used for the current file instead of re-reading its own log, since
+    the caller is in the middle of writing it and has the up-to-date value
+    already; siblings are read from their own persisted logs.
+
+    Returns [] when this file has no detected version number, or no other
+    matching versions exist - callers use that to skip the section
+    entirely rather than showing a redundant single-entry list.
+    """
+    directory = os.path.dirname(filepath)
+    ext = os.path.splitext(filepath)[1]
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    base, _num = _version_base_and_number(stem)
+    if base is None:
+        return []
+
+    results = []
+    try:
+        for name in os.listdir(directory):
+            if os.path.splitext(name)[1].lower() != ext.lower():
+                continue
+            other_stem = os.path.splitext(name)[0]
+            other_base, other_num = _version_base_and_number(other_stem)
+            if other_base != base or other_num is None:
+                continue
+            other_path = os.path.join(directory, name)
+            if os.path.normcase(os.path.abspath(other_path)) == os.path.normcase(os.path.abspath(filepath)):
+                results.append((other_num, this_version_total, True))
+            else:
+                sibling_sessions = parse_sessions(get_log_path(other_path))
+                sibling_total = sum(s["seconds"] for s in sibling_sessions.values())
+                results.append((other_num, sibling_total, False))
+    except OSError:
+        return []
+
+    if len(results) < 2:
+        return []
+    results.sort(key=lambda r: int(r[0]))
+    return results
+
+
 def write_log(path, sessions, filepath):
     prefs = get_prefs()
     show_days = prefs.show_daily_breakdown if prefs else True
     show_sessions = prefs.show_session_detail if prefs else True
     show_users = prefs.log_usernames if prefs else True
+    show_versions = prefs.show_version_totals if prefs else True
 
     ordered = sorted(sessions.values(), key=lambda s: s["start"])
     total = sum(s["seconds"] for s in ordered)
+    versions = find_version_totals(filepath, total) if show_versions else []
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write("Total time on %s: %s\n\n" % (os.path.basename(filepath), format_hms(total)))
+            f.write("Total time on %s: %s\n" % (os.path.basename(filepath), format_hms(total)))
+            if versions:
+                all_versions_total = sum(v[1] for v in versions)
+                f.write("Total across all versions: %s\n" % format_hms(all_versions_total))
+            f.write("\n")
+
+            if versions:
+                f.write("By version:\n")
+                for number, secs, is_this_file in versions:
+                    marker = " (this file)" if is_this_file else ""
+                    f.write("  v%-6s %s%s\n" % (number, format_hms(secs), marker))
+                f.write("\n")
 
             if show_users:
                 f.write("By user:\n")
@@ -783,6 +859,20 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         default=False,
     )
 
+    show_version_totals: BoolProperty(
+        name="Show Version Totals",
+        description=(
+            "If this file is one of a numbered series (Blender's own Save "
+            "Incremental - name_001, name_002, ... - or BB_Kitsu-Pipeline "
+            "style - name_v001, name_v002, ...), show each version's total "
+            "and the sum across all of them. Only appears when another "
+            "matching version actually exists next to this file. "
+            "Independent of the other log detail toggles, so you can show "
+            "or hide it on its own regardless of what else is shown"
+        ),
+        default=True,
+    )
+
     kitsu_auto_assign: BoolProperty(
         name="Auto-assign Me to Task",
         description=(
@@ -824,6 +914,7 @@ class BBPT_AddonPreferences(bpy.types.AddonPreferences):
         col.prop(self, "show_session_detail")
         col.prop(self, "log_usernames")
         col.prop(self, "export_csv")
+        col.prop(self, "show_version_totals")
 
         layout.separator()
         col = layout.column(heading="Kitsu")
